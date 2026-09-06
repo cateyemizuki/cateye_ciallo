@@ -4,14 +4,18 @@
 
 1. LLM 工具 ``send_ciallo``：Planner 在用户明确要求打招呼时调用，可传入
    ``message_id`` 对指定消息引用回复；
-2. 命令 ``/ciallo``：任何人可用；引用某条消息发送命令时，改为对那条消息
-   发送 Ciallo；
+2. 命令 ``/ciallo``：任何人可用。**仅当整条消息就是 ``/ciallo``（允许首尾
+   空白）时触发**。宿主对命令用 ``re.search`` 匹配处理后的整段文本
+   （``processed_plain_text``），引用某条消息时被引用内容会拼进该文本，
+   因此「引用消息 + 输入 /ciallo」不会作为命令触发；需要对指定消息引用
+   回复请让 LLM 调用工具 ``send_ciallo(message_id=...)``，或开启关键词
+   自动回复；
 3. 关键词自动回复（默认关闭）：消息命中关键词时，自动对那条消息引用回复
    一条 Ciallo。
 
-「引用回复」均指 QQ 的引用指定消息来回复：命令路径取命令消息 reply 段的
-``target_message_id``，工具路径取 LLM 传入的 ``message_id``，最终由宿主
-构建 ReplyComponent、适配器编码为平台引用段。
+「引用回复」均指 QQ 的引用指定消息来回复：工具路径取 LLM 传入的
+``message_id``，关键词路径取命中消息的 ``message_id``，最终由宿主构建
+ReplyComponent、适配器编码为平台引用段。
 
 语音输出（默认关闭）：``[voice].enabled`` 开启后，每条 Ciallo 独立以
 ``[voice].probability``（0~1，默认 1.0 = 全部语音）的概率**替换为语音发送**
@@ -83,7 +87,7 @@ class KeywordReplySectionConfig(PluginConfigBase):
         description="是否启用关键词匹配自动回复",
     )
     keywords: list[str] = Field(
-        default_factory=lambda: ["Ciallo"],
+        default_factory=lambda: ["ciallo"],
         description="触发关键词列表：消息文本包含任一关键词（不区分大小写）即自动回复一条 Ciallo",
     )
     cooldown_seconds: float = Field(
@@ -172,7 +176,7 @@ class CialloPlugin(MaiBotPlugin):
         except Exception as exc:
             self.ctx.logger.warning("[Ciallo] 上报语音补录网关状态失败：%s", exc)
         self.ctx.logger.info(
-            "Ciallo 插件已加载：/ciallo 命令与 send_ciallo 工具就绪；关键词回复%s，关键词=%s",
+            "Ciallo 插件已加载：命令 /ciallo（仅整条消息触发）与工具 send_ciallo 就绪；关键词回复%s，关键词=%s",
             "已启用" if keyword_cfg.enabled else "未启用",
             keyword_cfg.keywords,
         )
@@ -480,23 +484,6 @@ class CialloPlugin(MaiBotPlugin):
                     return True
         return False
 
-    @staticmethod
-    def _extract_reply_target(message: Any) -> str:
-        """从入站消息的 raw_message 中提取被回复消息的 ID。"""
-        if not isinstance(message, dict):
-            return ""
-        raw_segments = message.get("raw_message")
-        if not isinstance(raw_segments, list):
-            return ""
-        for segment in raw_segments:
-            if isinstance(segment, dict) and segment.get("type") == "reply":
-                data = segment.get("data")
-                if isinstance(data, dict):
-                    target_id = str(data.get("target_message_id") or "").strip()
-                    if target_id:
-                        return target_id
-        return ""
-
     # ------------------------------------------------------------------
     # 组件 1：LLM 工具
     # ------------------------------------------------------------------
@@ -529,17 +516,23 @@ class CialloPlugin(MaiBotPlugin):
 
     # ------------------------------------------------------------------
     # 组件 2：/ciallo 命令（任何人可用，不做权限限制）
+    #
+    # 触发语义（严格整条）：宿主用 re.search() 对 processed_plain_text 匹配
+    # pattern（_process_commands 用未 strip 的文本、_is_command_candidate 用
+    # strip 后的文本做前置筛选），因此 ^\s*...\s*$ 只允许首尾空白。引用某条
+    # 消息时 processed_plain_text = 被回复内容 + 本次输入，故「引用 + /ciallo」
+    # 不会命中本命令；hello ciallo、say /ciallo、裸 ciallo、/ciallo 带其它文字
+    # 也一律不触发。确保只有整条消息就是 /ciallo 时才会被当命令拦截。
     # ------------------------------------------------------------------
 
     @Command(
         "ciallo",
-        description="发送一个Ciallo～(∠・ω< )⌒★；引用某条消息发送本命令时，改为对那条消息回复",
-        pattern=r"(?<!\S)/?ciallo\s*$",
+        description="发送一个Ciallo～(∠・ω< )⌒★（仅当整条消息为 /ciallo 时触发）",
+        pattern=r"^\s*/ciallo\s*$",
     )
     async def cmd_ciallo(self, **kwargs: Any) -> tuple[bool, str, bool]:
         stream_id = str(kwargs.get("stream_id") or "")
-        reply_to = self._extract_reply_target(kwargs.get("message"))
-        await self._send_ciallo(stream_id, reply_to=reply_to)
+        await self._send_ciallo(stream_id)
         return True, "ciallo", True
 
     # ------------------------------------------------------------------

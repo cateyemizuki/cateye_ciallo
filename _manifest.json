@@ -3,7 +3,7 @@
   "id": "github.cateye.ciallo",
   "version": "1.0.0",
   "name": "Ciallo～(∠・ω< )⌒★",
-  "description": "让麦麦可爱地打个招呼，发送 Ciallo～(∠・ω< )⌒★。提供 LLM 工具 send_ciallo（可传入 message_id 对指定消息引用回复）、命令 /ciallo（任何人可用，引用某条消息发送命令时改为对那条消息回复），以及可选的关键词自动回复（配置启用后，命中关键词的消息会自动收到一条 Ciallo 引用回复）。另支持语音输出模式（默认关闭）：开启后所有 Ciallo 一律以语音直接发出，不再引用回复；语音文件需手动放置到插件数据目录。",
+  "description": "让麦麦可爱地打个招呼，发送 Ciallo～(∠・ω< )⌒★。提供 LLM 工具 send_ciallo（可传入 message_id 对指定消息引用回复）与命令 /ciallo（任何人可用，仅当整条消息为 /ciallo 时触发并发送一条 Ciallo），以及可选的关键词自动回复（默认关闭，配置启用后命中关键词的消息自动收到一条 Ciallo 引用回复）。另支持可选语音输出（默认关闭）：开启后每条 Ciallo 按 [voice].probability（0~1，默认 1.0 = 全部语音）的概率独立替换为语音直接发出，未替换时仍按正常文本逻辑发送；插件自带默认语音 assets/ciallo.wav（安装即用，无需手动放置），如需自定义可在插件数据目录放同名文件覆盖（数据目录优先）。",
   "author": {
     "name": "cateye",
     "url": "https://github.com/cateyemizuki"

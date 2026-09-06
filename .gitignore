@@ -4,5 +4,8 @@
 __pycache__/
 *.py[cod]
 
+# 离线自测代码（本地开发用，不随插件上传，见插件中心发布规范）
+/tests/
+
 # Issue 提交文档（本地使用，不随插件上传）
 /ISSUE_SUBMISSION.md

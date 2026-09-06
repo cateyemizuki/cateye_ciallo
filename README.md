@@ -20,9 +20,18 @@
 ### 2. 命令 `/ciallo`
 
 - 任何人可用，无权限限制。
-- 直接发送 `/ciallo`（或 `ciallo`）：机器人发送一条 Ciallo。
-- 引用某条消息发送 `/ciallo`：改为对被回复的那条消息发送 Ciallo（引用回复）。
-- 命令命中后拦截后续消息处理，不会重复触发 LLM 回复。
+- **仅当整条消息就是 `/ciallo`（允许首尾空白）时触发**：机器人发送一条 Ciallo。
+- 触发后拦截后续消息处理，不会重复触发 LLM 回复。
+- **不触发的情况**：裸 `ciallo`、`hello ciallo`、`say /ciallo`、`/ciallo 走起`、
+  **引用某条消息 + 输入 `/ciallo`** 等一律不触发。原因：宿主对命令用 `re.search`
+  匹配**处理后的整段文本**（`processed_plain_text`），而引用消息时该文本 =
+  **被回复内容 + 本次输入**（见开发文档 §7.2），因此只要消息带了引用或其他内容，
+  整段文本就不等于 `/ciallo`，不会命中；插件也无法从该文本中区分“引用内容”
+  与“闲聊前缀”。
+- 需要对**指定消息引用回复** Ciallo 时，请使用：
+  - LLM 工具 `send_ciallo(message_id=...)`（对 Planner 说「引用回复刚才那条/这条
+    消息发个 Ciallo」）；
+  - 或开启关键词自动回复（自动对命中消息引用回复）。
 
 ### 3. 关键词自动回复（默认关闭）
 
@@ -38,11 +47,11 @@
 
 ### 4. 语音输出（默认关闭，可设概率）
 
-在配置中启用 `[voice].enabled` 后，每条 Ciallo（命令 / LLM 工具 / 关键词自动回复）
+在配置中启用 `[voice].enabled` 后，每条 Ciallo（命令 `/ciallo` / LLM 工具 / 关键词自动回复）
 按 `[voice].probability`（0~1，默认 `1.0`）**独立随机**决定是否替换为语音直接发出：
 被选中的以语音发出且**不引用回复**任何消息；未被选中的按正常文本逻辑发送
-（需要引用回复时仍会引用）。`probability=1.0` 即「全部语音」，`0` 即「全部文本」，
-`0.5` 约一半语音。
+（工具 / 关键词路径需要引用回复时仍会引用；`/ciallo` 命令本身只整条消息触发、不引用）。
+`probability=1.0` 即「全部语音」，`0` 即「全部文本」，`0.5` 约一半语音。
 
 **插件自带默认语音**（仓库内 `assets/ciallo.wav`，安装即用，无需手动放置）；
 如要自定义，把同名文件放入插件数据目录即可覆盖（数据目录优先于内置文件，替换无需重启，
@@ -85,7 +94,7 @@ WebUI 聊天记录显示「麦麦：Ciallo～(∠・ω< )⌒★」），不真�
 | `[plugin]` | `enabled` | `true` | 是否启用插件 |
 | `[plugin]` | `config_version` | `"1.0.0"` | 配置版本（WebUI 隐藏，勿改） |
 | `[keyword_reply]` | `enabled` | `false` | 是否启用关键词匹配自动回复 |
-| `[keyword_reply]` | `keywords` | `["Ciallo"]` | 触发关键词列表，消息文本包含任一关键词（不区分大小写）即触发 |
+| `[keyword_reply]` | `keywords` | `["ciallo"]` | 触发关键词列表，消息文本包含任一关键词（不区分大小写）即触发 |
 | `[keyword_reply]` | `cooldown_seconds` | `30.0` | 同一会话两次关键词回复的最小间隔（秒） |
 | `[voice]` | `enabled` | `false` | 开启后每条 Ciallo 按 `probability` 概率以语音直接发出（替换文本）；未替换时仍走文本逻辑 |
 | `[voice]` | `probability` | `1.0` | 替换为语音发送的概率（0~1）：`1.0` 全部语音 / `0` 全部文本 / `0.5` 约一半语音 |
@@ -95,12 +104,15 @@ WebUI 聊天记录显示「麦麦：Ciallo～(∠・ω< )⌒★」），不真�
 
 ## 验证步骤
 
-1. **命令测试**：聊天中发送 `/ciallo` → 机器人发送一条 Ciallo；引用某条消息发送 `/ciallo` → 对那条消息引用回复。
-2. **工具测试**：聊天中明确说「打个招呼吧 / 发个 Ciallo」，观察 Planner 日志 `plugin.invoke_tool` 调用 `send_ciallo`。
-3. **关键词测试**：WebUI 开启 `[keyword_reply].enabled`，发送含 `Ciallo` 的消息 → 收到引用回复；再连续发送，确认冷却生效。
-4. **语音测试**：开启 `[voice].enabled` 发送 `/ciallo` → 机器人直接发出内置默认语音（不引用回复），且聊天记录出现一条 bot 的 Ciallo 文本补录；自定义语音：往数据目录放入同名文件再触发 → 使用自定义文件；删除数据目录文件再触发 → 回退内置语音。
+1. **命令验证**：聊天中发送 `/ciallo`（含首尾空格）→ 机器人发送一条 Ciallo。
+   **不触发验证**：发送 `ciallo`、`/Ciallo`、`hello ciallo`、`say /ciallo`、`/ciallo 走起`、
+   引用某条消息后输入 `/ciallo` → 机器人**不**发 Ciallo，也不拦截（若需引用回复请让 Planner 走工具或开关键词）。
+2. **工具验证**：聊天中明确说「打个招呼吧 / 发个 Ciallo」「引用回复刚才那条发个 Ciallo」，
+   观察 Planner 日志 `plugin.invoke_tool` 调用 `send_ciallo`（带/不带 `message_id`）。
+3. **关键词验证**：WebUI 开启 `[keyword_reply].enabled`，发送含 `ciallo`（任意大小写）的消息 → 收到引用回复；再连续发送，确认冷却生效。
+4. **语音验证**：开启 `[voice].enabled` 发送 `/ciallo` → 机器人直接发出内置默认语音（不引用回复），且聊天记录出现一条 bot 的 Ciallo 文本补录；自定义语音：往数据目录放入同名文件再触发 → 使用自定义文件；删除数据目录文件再触发 → 回退内置语音。
 5. **热重载**：修改 `config.toml` 保存 → 观察日志 `Ciallo 配置已热更新`。
-6. **卸载测试**：在 WebUI 停用插件，确认日志 `Ciallo 插件已卸载` 且无残留报错。
+6. **卸载验证**：在 WebUI 停用插件，确认日志 `Ciallo 插件已卸载` 且无残留报错。
 
 ## 实现说明（引用回复）
 
@@ -112,6 +124,9 @@ MaiBot 1.2.3 的 `ctx.send.text` 不支持直接指定被引用消息（宿主 s
 2. 在 `send_service.before_send` 阻塞钩子中，识别出本插件发出的 Ciallo 出站消息，
    向 Hook 的 `modified_kwargs` 注入 `set_reply=True` 与 `reply_message_id=<目标>`；
 3. 宿主 `_send_via_platform_io` 读取这两个键后构建 ReplyComponent，经适配器编码为平台引用段发出。
+
+> 该引用回复通道只服务于**工具 `send_ciallo(message_id=...)` 与关键词自动回复**（需要引用时）。
+> `/ciallo` 命令只整条消息触发、只普通发送一条 Ciallo，不参与引用注入。
 
 该通道不耦合具体适配器（任何支持 reply 段的适配器均适用），消息照常入库、同步 Maisaka 上下文。
 
@@ -134,32 +149,20 @@ OneBot `record` 段（`base64://`）发送。语音替换按概率独立随机�
 ```
 cateye_ciallo/
 ├── _manifest.json        # 插件清单（Manifest v2）
-├── plugin.py             # 入口：工具 send_ciallo + 命令 /ciallo + 2 个 Hook + 语音补录网关
+├── plugin.py             # 入口：工具 send_ciallo + 命令 /ciallo（整条消息触发）+ 2 个 Hook + 语音补录网关
 ├── assets/
 │   └── ciallo.wav        # 内置默认语音（随插件分发，安装即用；可被数据目录文件覆盖）
 ├── LICENSE               # MIT
 ├── README.md
-├── .gitignore            # 忽略 /config.toml、/ISSUE_SUBMISSION.md（运行时生成/本地使用）
-└── tests/
-    └── test_offline.py   # 离线自测（用 MaiBot venv 运行，无需启动机器人）
+└── .gitignore            # 忽略运行时生成的配置与本地开发/提交辅助文件（详见 .gitignore）
 ```
-
-离线自测运行方式：
-
-```bash
-<MaiBot根目录>/.venv/Scripts/python.exe tests/test_offline.py
-```
-
-覆盖：组件清单与命名唯一性、命令普通/回复场景、before_send 引用注入、
-工具调用、关键词启停/命中/防重、语音概率（1/0/0.5/越界）、内置语音与自定义覆盖、
-默认配置、on_unload 清理。
 
 ## 故障排查
 
 | 现象 | 处置 |
 |---|---|
 | 日志报 `E_CAPABILITY_DENIED ... send.text` / `send.hybrid` | manifest 能力声明缺失（本插件已声明），修改过 manifest 需完整重启 MaiBot |
-| `/ciallo` 无反应 | 命令用 `re.search` 匹配且先经过违禁词过滤，确认文本为 `/ciallo`（结尾）；查主进程日志 |
+| `/ciallo` 无反应 | 命令用 `re.search` 匹配 `processed_plain_text` 且只认**整条消息为 `/ciallo`**（首尾可带空白；裸 `ciallo`、带前缀/后缀、引用消息等均不触发）；确认文本没有多余字符；查主进程日志 |
 | 引用回复变成普通发送 | 确认适配器支持 reply 段编码；确认 `[voice] enabled=false`（语音模式下永远不引用回复）；查主进程日志 `[cap.send.text]` 相关报错 |
 | 语音不发出 / 回退为文本 | 看日志提示的语音文件路径，确认文件已放置、`[voice].file_name` 与实际文件名一致；格式不被 NapCat 支持时安装/确认其 ffmpeg |
 | 关键词不触发 | 确认 `[keyword_reply] enabled=true` 已热重载生效、消息非命令/通知、且不在冷却窗口内 |
