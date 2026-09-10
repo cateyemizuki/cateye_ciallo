@@ -52,7 +52,7 @@ from maibot_sdk.types import (
     ToolParamType,
 )
 
-SUPPORTED_CONFIG_VERSION = "1.0.0"  # 与 _manifest.json 的 version 保持同步
+SUPPORTED_CONFIG_VERSION = "1.0.1"  # 与 _manifest.json 的 version 保持同步
 
 CIALLO_TEXT = "Ciallo～(∠・ω< )⌒★"
 
@@ -61,22 +61,34 @@ _PENDING_REPLY_TTL_SEC = 30.0
 
 
 class PluginSectionConfig(PluginConfigBase):
-    """插件基础配置。"""
+    """插件基础配置（plugin 配置节）。"""
 
     __ui_label__ = "插件"
     __ui_icon__ = "waving_hand"
     __ui_order__ = 0
 
-    enabled: bool = Field(default=True, description="是否启用插件")
+    enabled: bool = Field(
+        default=True,
+        description="是否启用插件",
+        json_schema_extra={
+            "label": "启用插件",
+            "hint": "插件总开关",
+        },
+    )
     config_version: str = Field(
         default=SUPPORTED_CONFIG_VERSION,
         description="配置版本（与插件版本同步）",
-        json_schema_extra={"hidden": True, "disabled": True},
+        json_schema_extra={
+            "hidden": True,
+            "disabled": True,
+            "label": "配置版本",
+            "hint": "配置版本，勿改",
+        },
     )
 
 
 class KeywordReplySectionConfig(PluginConfigBase):
-    """关键词自动回复配置。"""
+    """关键词自动回复配置（keyword_reply 配置节）。"""
 
     __ui_label__ = "关键词回复"
     __ui_icon__ = "auto_awesome"
@@ -85,20 +97,32 @@ class KeywordReplySectionConfig(PluginConfigBase):
     enabled: bool = Field(
         default=False,
         description="是否启用关键词匹配自动回复",
+        json_schema_extra={
+            "label": "启用关键词回复",
+            "hint": "关键词自动回复开关",
+        },
     )
     keywords: list[str] = Field(
         default_factory=lambda: ["ciallo"],
         description="触发关键词列表：消息文本包含任一关键词（不区分大小写）即自动回复一条 Ciallo",
+        json_schema_extra={
+            "label": "触发关键词",
+            "hint": "触发关键词，每行一个",
+        },
     )
     cooldown_seconds: float = Field(
         default=30.0,
         ge=0,
         description="同一会话两次关键词回复的最小间隔（秒），防止刷屏",
+        json_schema_extra={
+            "label": "回复冷却间隔（秒）",
+            "hint": "回复最短间隔（秒）",
+        },
     )
 
 
 class VoiceSectionConfig(PluginConfigBase):
-    """语音输出配置。"""
+    """语音输出配置（voice 配置节）。"""
 
     __ui_label__ = "语音输出"
     __ui_icon__ = "graphic_eq"
@@ -107,16 +131,28 @@ class VoiceSectionConfig(PluginConfigBase):
     enabled: bool = Field(
         default=False,
         description="开启后每条 Ciallo 按 probability 概率以语音直接发出（替换文本），未替换时仍走文本逻辑",
+        json_schema_extra={
+            "label": "启用语音输出",
+            "hint": "语音输出总开关",
+        },
     )
     probability: float = Field(
         default=1.0,
         ge=0,
         le=1,
         description="替换为语音发送的概率（0~1）：1.0 = 全部语音，0 = 全部文本，0.5 = 约一半语音",
+        json_schema_extra={
+            "label": "语音概率",
+            "hint": "语音发送概率（0~1）",
+        },
     )
     file_name: str = Field(
         default="ciallo.wav",
         description="语音文件名（仅允许纯文件名，不支持子目录）；插件自带同名默认语音（assets/），如需自定义可把同名文件放入数据目录 data/plugins/github.cateye.ciallo/ 覆盖",
+        json_schema_extra={
+            "label": "语音文件名",
+            "hint": "语音文件名",
+        },
     )
 
 
