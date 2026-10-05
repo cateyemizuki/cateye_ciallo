@@ -27,7 +27,8 @@ ReplyComponent、适配器编码为平台引用段。
 
 实现说明：``ctx.send.text`` 无法直接指定被引用消息（宿主 send 链路的
 ``reply_message_id`` 不对外暴露），因此文本引用回复采用「挂起目标 + 出站
-钩子注入」的方式：发送前把目标消息 ID 挂起到 ``_pending_replies``，由
+钩子注入」的方式：发送前把目标消息 ID 挂起到 ``_pending_replies``（按
+会话多槽存放，带 TTL 时间窗、每会话上限与发送者一致性校验），由
 ``send_service.before_send`` 钩子对本插件发出的 Ciallo 消息注入
 ``set_reply=True`` 与 ``reply_message_id``（宿主 ``_send_via_platform_io``
 会读取这两个键并构建 ReplyComponent）。
@@ -35,8 +36,10 @@ ReplyComponent、适配器编码为平台引用段。
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import random
+import re
 import time
 from pathlib import Path
 from typing import Any, ClassVar
@@ -52,12 +55,25 @@ from maibot_sdk.types import (
     ToolParamType,
 )
 
-SUPPORTED_CONFIG_VERSION = "1.0.1"  # 与 _manifest.json 的 version 保持同步
+SUPPORTED_CONFIG_VERSION = "1.0.3"  # 与 _manifest.json 的 version 保持同步
 
 CIALLO_TEXT = "Ciallo～(∠・ω< )⌒★"
 
+
+def _en_i18n(en_label: str, en_hint: str = "") -> dict[str, str]:
+    """字段级英文翻译（并入 json_schema_extra；WebUI 按 i18n['en']['label'/'hint'] 取用）。"""
+    entry: dict[str, str] = {"label": en_label}
+    if en_hint:
+        entry["hint"] = en_hint
+    return {"i18n": {"en": entry}}
+
 # 挂起的引用回复目标最长存活时间（秒），超时未消费即丢弃，避免错误注入到后续消息
-_PENDING_REPLY_TTL_SEC = 30.0
+_PENDING_REPLY_TTL_SEC = 60.0
+# 同一会话挂起的引用回复目标上限，防止异常堆积泄漏
+_PENDING_REPLY_MAX_PER_STREAM = 4
+# 语音文件名白名单：仅允许字母/数字/下划线/连字符/点组成的纯文件名
+# （拒绝 `:`（Windows ADS 形态）、路径分隔符等一切其他字符）
+_VOICE_FILE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 class PluginSectionConfig(PluginConfigBase):
@@ -66,6 +82,9 @@ class PluginSectionConfig(PluginConfigBase):
     __ui_label__ = "插件"
     __ui_icon__ = "waving_hand"
     __ui_order__ = 0
+    __ui_i18n__: ClassVar[dict[str, dict[str, str]]] = {
+        "en": {"title": "Plugin", "description": "Basic plugin settings."}
+    }
 
     enabled: bool = Field(
         default=True,
@@ -73,6 +92,7 @@ class PluginSectionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "启用插件",
             "hint": "插件总开关",
+            **_en_i18n("Enable plugin", "Master switch for the plugin."),
         },
     )
     config_version: str = Field(
@@ -83,6 +103,7 @@ class PluginSectionConfig(PluginConfigBase):
             "disabled": True,
             "label": "配置版本",
             "hint": "配置版本，勿改",
+            **_en_i18n("Config version", "Config version, do not modify."),
         },
     )
 
@@ -93,6 +114,12 @@ class KeywordReplySectionConfig(PluginConfigBase):
     __ui_label__ = "关键词回复"
     __ui_icon__ = "auto_awesome"
     __ui_order__ = 1
+    __ui_i18n__: ClassVar[dict[str, dict[str, str]]] = {
+        "en": {
+            "title": "Keyword Reply",
+            "description": "Auto-reply with a Ciallo when a message contains a keyword.",
+        }
+    }
 
     enabled: bool = Field(
         default=False,
@@ -100,6 +127,7 @@ class KeywordReplySectionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "启用关键词回复",
             "hint": "关键词自动回复开关",
+            **_en_i18n("Enable keyword reply", "Toggle keyword auto-reply."),
         },
     )
     keywords: list[str] = Field(
@@ -108,6 +136,7 @@ class KeywordReplySectionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "触发关键词",
             "hint": "触发关键词，每行一个",
+            **_en_i18n("Trigger keywords", "Keywords, one per line."),
         },
     )
     cooldown_seconds: float = Field(
@@ -117,6 +146,7 @@ class KeywordReplySectionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "回复冷却间隔（秒）",
             "hint": "回复最短间隔（秒）",
+            **_en_i18n("Reply cooldown (seconds)", "Minimum interval between replies in one chat."),
         },
     )
 
@@ -127,6 +157,12 @@ class VoiceSectionConfig(PluginConfigBase):
     __ui_label__ = "语音输出"
     __ui_icon__ = "graphic_eq"
     __ui_order__ = 2
+    __ui_i18n__: ClassVar[dict[str, dict[str, str]]] = {
+        "en": {
+            "title": "Voice Output",
+            "description": "Replace Ciallo text with voice messages by probability.",
+        }
+    }
 
     enabled: bool = Field(
         default=False,
@@ -134,6 +170,7 @@ class VoiceSectionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "启用语音输出",
             "hint": "语音输出总开关",
+            **_en_i18n("Enable voice output", "Master switch for voice output."),
         },
     )
     probability: float = Field(
@@ -144,14 +181,16 @@ class VoiceSectionConfig(PluginConfigBase):
         json_schema_extra={
             "label": "语音概率",
             "hint": "语音发送概率（0~1）",
+            **_en_i18n("Voice probability", "Chance to send as voice (0~1)."),
         },
     )
     file_name: str = Field(
         default="ciallo.wav",
-        description="语音文件名（仅允许纯文件名，不支持子目录）；插件自带同名默认语音（assets/），如需自定义可把同名文件放入数据目录 data/plugins/github.cateye.ciallo/ 覆盖",
+        description="语音文件名（仅允许字母/数字/下划线/连字符/点组成的纯文件名，不支持子目录）；插件自带同名默认语音（assets/），如需自定义可把同名文件放入数据目录 data/plugins/github.cateye.ciallo/ 覆盖",
         json_schema_extra={
             "label": "语音文件名",
             "hint": "语音文件名",
+            **_en_i18n("Voice file name", "Voice file name (file name only)."),
         },
     )
 
@@ -171,15 +210,20 @@ class CialloPlugin(MaiBotPlugin):
 
     def __init__(self) -> None:
         super().__init__()
-        # stream_id -> (被引用消息ID, 挂起时刻 monotonic)
-        self._pending_replies: dict[str, tuple[str, float]] = {}
+        # stream_id -> [挂起条目]；每条含 token / 被引用消息ID / 挂起时刻 / 期望发送者，
+        # 支持同会话并发的多次带引用发送（发送结束按 token 精确清理，TTL 兜底）
+        self._pending_replies: dict[str, list[dict[str, Any]]] = {}
         # stream_id -> 上次关键词回复时刻（monotonic）
         self._keyword_reply_last_at: dict[str, float] = {}
+        # 关键词后台回复任务引用（防 GC；unload 时统一取消）
+        self._keyword_reply_tasks: set[asyncio.Task[None]] = set()
         # 语音文件缓存：(路径, mtime, base64)；文件变更自动重载
         self._voice_cache: tuple[Path, float, str] | None = None
         self._voice_missing_logged: bool = False
         # 语音补录用机器人昵称缓存：(nickname, expires 时刻)
         self._bot_nickname_cache: tuple[str, float] | None = None
+        # 获取机器人昵称失败是否已告警过（非 QQ 平台每小时重试，仅首次告警，之后静默）
+        self._bot_nickname_warned: bool = False
 
     # ------------------------------------------------------------------
     # 组件：语音补录网关（MessageGateway receive，route_message 注入合成消息入库）
@@ -229,6 +273,9 @@ class CialloPlugin(MaiBotPlugin):
             await self.ctx.gateway.update_state("ciallo_voice_recorder", ready=False)
         except Exception:
             pass
+        for task in list(self._keyword_reply_tasks):
+            task.cancel()
+        self._keyword_reply_tasks.clear()
         self._pending_replies.clear()
         self._keyword_reply_last_at.clear()
         self._voice_cache = None
@@ -264,7 +311,7 @@ class CialloPlugin(MaiBotPlugin):
             return True
         return random.random() < probability
 
-    async def _send_ciallo(self, stream_id: str, reply_to: str = "") -> bool:
+    async def _send_ciallo(self, stream_id: str, reply_to: str = "", reply_sender_id: str = "") -> bool:
         """发送一条 Ciallo。
 
         语音输出开启时，本次若被概率选中（``_voice_enabled_now``）则以语音直接
@@ -272,8 +319,10 @@ class CialloPlugin(MaiBotPlugin):
         非空时以引用回复形式发送）。
 
         ``ctx.send.text`` 不支持直接指定被引用消息，因此文本引用回复先把
-        目标挂起到 ``_pending_replies``，由 ``send_service.before_send``
-        钩子在出站链上注入 ``set_reply`` / ``reply_message_id``。
+        目标挂起到 ``_pending_replies``（按 token 多槽存放，``reply_sender_id``
+        为触发上下文已知的机器人账号，供钩子做发送者一致性校验），由
+        ``send_service.before_send`` 钩子在出站链上注入 ``set_reply`` /
+        ``reply_message_id``。
         """
         if not stream_id:
             self.ctx.logger.warning("[Ciallo] 缺少 stream_id，无法发送")
@@ -284,21 +333,94 @@ class CialloPlugin(MaiBotPlugin):
         if not target_id:
             return bool(await self.ctx.send.text(CIALLO_TEXT, stream_id))
 
-        self._pending_replies[stream_id] = (target_id, time.monotonic())
+        token = self._register_pending_reply(stream_id, target_id, sender_id=reply_sender_id)
         try:
             return bool(await self.ctx.send.text(CIALLO_TEXT, stream_id))
         finally:
+            self._pop_pending_reply(stream_id, token)
+
+    def _register_pending_reply(self, stream_id: str, target_id: str, sender_id: str = "") -> str:
+        """登记一条挂起的引用回复目标并返回本次挂起的 token。
+
+        同一会话允许并存多条挂起（上限 ``_PENDING_REPLY_MAX_PER_STREAM``，
+        满时丢弃最旧的），登记时顺手清理已过期的条目，防堆积泄漏。
+        """
+        now = time.monotonic()
+        entries = self._pending_replies.setdefault(stream_id, [])
+        entries[:] = [
+            entry for entry in entries if now - entry["created_at"] <= _PENDING_REPLY_TTL_SEC
+        ]
+        while len(entries) >= _PENDING_REPLY_MAX_PER_STREAM:
+            entries.pop(0)
+        token = uuid4().hex
+        entries.append(
+            {"token": token, "target_id": target_id, "created_at": now, "sender_id": sender_id}
+        )
+        return token
+
+    def _pop_pending_reply(self, stream_id: str, token: str) -> None:
+        """按 token 精确移除挂起条目（发送完成即清理）。"""
+        entries = self._pending_replies.get(stream_id)
+        if not entries:
+            return
+        remaining = [entry for entry in entries if entry["token"] != token]
+        if remaining:
+            self._pending_replies[stream_id] = remaining
+        else:
             self._pending_replies.pop(stream_id, None)
+
+    def _claim_pending_reply(self, stream_id: str, sender_id: str) -> dict[str, Any] | None:
+        """为一条 Ciallo 文本出站消息认领一条挂起目标（认领即移除）。
+
+        按先进先出取第一条「未过期且发送者一致」的挂起；``sender_id`` 为出站
+        消息的发送者（机器人账号），与登记时记录的期望发送者做一致性校验，
+        任一方未知则放行（此时仅靠 TTL 时间窗兜底）。
+        """
+        entries = self._pending_replies.get(stream_id)
+        if not entries:
+            return None
+        now = time.monotonic()
+        claimed: dict[str, Any] | None = None
+        remaining: list[dict[str, Any]] = []
+        for entry in entries:
+            if now - entry["created_at"] > _PENDING_REPLY_TTL_SEC:
+                # 已过期：顺手丢弃，防堆积
+                continue
+            if claimed is None and self._sender_consistent(entry["sender_id"], sender_id):
+                claimed = entry
+            else:
+                remaining.append(entry)
+        if remaining:
+            self._pending_replies[stream_id] = remaining
+        else:
+            self._pending_replies.pop(stream_id, None)
+        return claimed
+
+    @staticmethod
+    def _sender_consistent(expected: str, actual: str) -> bool:
+        """发送者一致性校验：两侧均已知时必须一致，任一侧未知则放行。"""
+        if not expected or not actual:
+            return True
+        return expected == actual
 
     def _voice_file_candidates(self) -> list[Path]:
         """语音文件查找链：数据目录用户自定义文件优先，其次插件内置 assets/ 兜底。
 
-        文件名仅允许纯文件名（防路径穿越）；非法时返回空列表。
+        文件名走白名单校验：仅允许字母/数字/下划线/连字符/点组成的纯文件名，
+        拒绝 ``:``（Windows ADS 形态如 ``xxx.wav:ads``）、路径分隔符、空白等
+        一切其他字符；非法时返回空列表。
         """
         file_name = str(self.config.voice.file_name or "").strip()
-        if not file_name or Path(file_name).name != file_name:
+        if (
+            not file_name
+            or file_name in (".", "..")
+            or not _VOICE_FILE_NAME_RE.fullmatch(file_name)
+            or Path(file_name).name != file_name
+        ):
             self.ctx.logger.warning(
-                "[Ciallo] 语音文件名非法：%r（仅允许纯文件名，不支持子目录）", file_name
+                "[Ciallo] 语音文件名非法：%r（仅允许字母/数字/下划线/连字符/点组成的纯文件名，"
+                "不支持子目录等其它形态）",
+                file_name,
             )
             return []
         candidates = [(self.ctx.paths.data_dir / file_name).resolve()]
@@ -490,9 +612,42 @@ class CialloPlugin(MaiBotPlugin):
                 data = result.get("data") if isinstance(result.get("data"), dict) else result
                 nickname = str(data.get("nickname") or data.get("user_nickname") or "").strip() or self_id
         except Exception as exc:
-            self.ctx.logger.warning("[Ciallo] 获取机器人昵称失败（self_id=%s）：%s", self_id, exc)
+            # 非 QQ 平台/适配器不支持该动作时会每次缓存过期都失败：仅首次告警，之后静默降级
+            if not self._bot_nickname_warned:
+                self._bot_nickname_warned = True
+                self.ctx.logger.warning(
+                    "[Ciallo] 获取机器人昵称失败（self_id=%s）：%s；后续将静默重试，不再重复告警",
+                    self_id,
+                    exc,
+                )
+            else:
+                self.ctx.logger.debug("[Ciallo] 获取机器人昵称失败（self_id=%s）：%s", self_id, exc)
         self._bot_nickname_cache = (nickname, now + 3600)
         return nickname
+
+    @staticmethod
+    def _outbound_sender_id(message: dict[str, Any]) -> str:
+        """取出站消息的发送者（机器人账号 user_id），取不到返回空串。"""
+        message_info = message.get("message_info")
+        if isinstance(message_info, dict):
+            user_info = message_info.get("user_info")
+            if isinstance(user_info, dict):
+                return str(user_info.get("user_id") or "").strip()
+        return ""
+
+    @staticmethod
+    def _inbound_self_id(message: dict[str, Any]) -> str:
+        """取入站消息所属适配器的机器人账号（additional_config 的 self_id 等键）。"""
+        message_info = message.get("message_info")
+        additional_config = (
+            message_info.get("additional_config") if isinstance(message_info, dict) else None
+        )
+        if isinstance(additional_config, dict):
+            for key in ("self_id", "platform_io_account_id", "account_id"):
+                value = str(additional_config.get(key) or "").strip()
+                if value:
+                    return value
+        return ""
 
     @staticmethod
     def _outbound_is_ciallo(message: dict[str, Any]) -> bool:
@@ -586,25 +741,31 @@ class CialloPlugin(MaiBotPlugin):
     async def hook_inject_reply(self, **kwargs: Any) -> dict[str, Any]:
         """把挂起的引用目标注入本插件正在发送的 Ciallo 文本消息。
 
+        认领规则（收紧后）：挂起目标本身携带从工具参数/命中消息上下文取到的
+        精确目标 ID，是主要的认领依据；「出站文本 == Ciallo」仅作为识别本插件
+        消息的回退门控，认领还需同时满足 TTL 时间窗与发送者一致性校验，避免
+        其他来源的同款文本消息被误注入。
+
         语音概率模式：未被概率选中的 Ciallo 走文本发送，仍应正常注入引用；
         因此本钩子不依赖语音开关，只对「文本 Ciallo 出站消息」注入。语音出站
-        消息（raw_message 含 voice/record 段）一律跳过，防止残留挂起误注入。
+        消息（raw_message 含 voice/record 段）一律跳过且不清除挂起（语音发送
+        不登记挂起，此时存在的挂起属于同会话并发的文本发送，交由其自身
+        finally 清理或 TTL 兜底）。
         """
         message = kwargs.get("message")
         if isinstance(message, dict):
             stream_id = str(message.get("session_id") or "")
-            pending = self._pending_replies.get(stream_id)
-            if pending is not None and self._outbound_is_ciallo(message):
+            if stream_id and self._pending_replies.get(stream_id) and self._outbound_is_ciallo(message):
                 if self._outbound_has_voice(message):
-                    # 语音出站消息不注入引用（语音始终直接发出）
-                    self._pending_replies.pop(stream_id, None)
+                    # 语音出站消息不注入引用（语音始终直接发出），不动挂起条目
                     return {"action": "continue", "modified_kwargs": kwargs}
-                self._pending_replies.pop(stream_id, None)
-                target_id, created_at = pending
-                if time.monotonic() - created_at <= _PENDING_REPLY_TTL_SEC:
+                claimed = self._claim_pending_reply(
+                    stream_id, self._outbound_sender_id(message)
+                )
+                if claimed is not None:
                     modified_kwargs = dict(kwargs)
                     modified_kwargs["set_reply"] = True
-                    modified_kwargs["reply_message_id"] = target_id
+                    modified_kwargs["reply_message_id"] = str(claimed["target_id"])
                     return {"action": "continue", "modified_kwargs": modified_kwargs}
         return {"action": "continue", "modified_kwargs": kwargs}
 
@@ -621,11 +782,23 @@ class CialloPlugin(MaiBotPlugin):
         timeout_ms=0,
     )
     async def hook_keyword_reply(self, **kwargs: Any) -> None:
-        """消息命中关键词时，在后台对那条消息引用回复一条 Ciallo。"""
+        """消息命中关键词时，创建后台任务对那条消息引用回复一条 Ciallo。
+
+        完整发送链（语音 base64 读盘、平台 I/O、补录、api.call）整体挪到
+        ``asyncio.create_task`` 后台执行，不阻塞入站消息处理链（适配器慢时
+        也不会拖住入站）；任务引用存入 ``_keyword_reply_tasks`` 防 GC，
+        unload 时统一取消，异常在本插件侧记录日志。
+        """
+        message = kwargs.get("message")
+        if not isinstance(message, dict):
+            return
+        task = asyncio.create_task(self._keyword_reply_task(message))
+        self._keyword_reply_tasks.add(task)
+        task.add_done_callback(self._keyword_reply_tasks.discard)
+
+    async def _keyword_reply_task(self, message: dict[str, Any]) -> None:
         try:
-            message = kwargs.get("message")
-            if isinstance(message, dict):
-                await self._maybe_keyword_reply(message)
+            await self._maybe_keyword_reply(message)
         except Exception:
             self.ctx.logger.exception("[Ciallo] 关键词自动回复处理异常")
 
@@ -664,7 +837,11 @@ class CialloPlugin(MaiBotPlugin):
 
         self._keyword_reply_last_at[stream_id] = now
         reply_to = str(message.get("message_id") or "").strip()
-        sent = await self._send_ciallo(stream_id, reply_to=reply_to)
+        sent = await self._send_ciallo(
+            stream_id,
+            reply_to=reply_to,
+            reply_sender_id=self._inbound_self_id(message),
+        )
         if sent:
             self.ctx.logger.info(
                 "[Ciallo] 已对命中关键词的消息自动回复（stream=%s, message_id=%s）",

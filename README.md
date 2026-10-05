@@ -4,8 +4,8 @@
 
 - 插件 ID：`github.cateye.ciallo`
 - 作者：cateye
-- 版本：1.0.0
-- 适配：MaiBot Host 1.0.0 ~ 1.99.99 / maibot-plugin-sdk 2.0.0 ~ 2.99.99（1.2.3 + SDK 2.8.0 实测）
+- 版本：1.0.3
+- 适配：MaiBot Host 1.0.0 ~ 1.99.99（1.2.x / 1.3.0 均兼容，策略 A 默认双代兼容声明）/ maibot-plugin-sdk 2.8.0 ~ 2.99.99（1.2.3 + SDK 2.8.0 实测）
 - 能力声明：`send.text` / `send.hybrid` / `chat.get_all_streams` / `api.call`
 
 ## 功能
@@ -70,7 +70,7 @@ WebUI 聊天记录显示「麦麦：Ciallo～(∠・ω< )⌒★」），不真�
 |---|---|
 | 内置默认语音（随插件分发） | `<插件目录>/assets/ciallo.wav` |
 | 自定义覆盖路径（优先） | `<MaiBot根目录>/data/plugins/github.cateye.ciallo/` |
-| 默认文件名 | `ciallo.wav`（可在 `[voice].file_name` 修改，仅允许纯文件名） |
+| 默认文件名 | `ciallo.wav`（可在 `[voice].file_name` 修改，仅允许字母/数字/下划线/连字符/点组成的纯文件名） |
 | 完整自定义默认路径 | `<MaiBot根目录>/data/plugins/github.cateye.ciallo/ciallo.wav` |
 | 支持格式 | wav / mp3 / silk 等（以 NapCat 支持为准，非 silk 格式通常需要其 ffmpeg） |
 
@@ -92,13 +92,13 @@ WebUI 聊天记录显示「麦麦：Ciallo～(∠・ω< )⌒★」），不真�
 | 配置节 | 字段 | 默认值 | 说明 |
 |---|---|---|---|
 | `[plugin]` | `enabled` | `true` | 是否启用插件 |
-| `[plugin]` | `config_version` | `"1.0.0"` | 配置版本（WebUI 隐藏，勿改） |
+| `[plugin]` | `config_version` | `"1.0.3"` | 配置版本（WebUI 隐藏，勿改） |
 | `[keyword_reply]` | `enabled` | `false` | 是否启用关键词匹配自动回复 |
 | `[keyword_reply]` | `keywords` | `["ciallo"]` | 触发关键词列表，消息文本包含任一关键词（不区分大小写）即触发 |
 | `[keyword_reply]` | `cooldown_seconds` | `30.0` | 同一会话两次关键词回复的最小间隔（秒） |
 | `[voice]` | `enabled` | `false` | 开启后每条 Ciallo 按 `probability` 概率以语音直接发出（替换文本）；未替换时仍走文本逻辑 |
 | `[voice]` | `probability` | `1.0` | 替换为语音发送的概率（0~1）：`1.0` 全部语音 / `0` 全部文本 / `0.5` 约一半语音 |
-| `[voice]` | `file_name` | `"ciallo.wav"` | 语音文件名（纯文件名）；内置 assets 自带同名默认语音，如需自定义把同名文件放入数据目录即可覆盖 |
+| `[voice]` | `file_name` | `"ciallo.wav"` | 语音文件名（仅允许字母/数字/下划线/连字符/点组成的纯文件名）；内置 assets 自带同名默认语音，如需自定义把同名文件放入数据目录即可覆盖 |
 
 修改 `config.toml` 保存即可热重载，日志出现 `Ciallo 配置已热更新`。
 
@@ -120,9 +120,10 @@ MaiBot 1.2.3 的 `ctx.send.text` 不支持直接指定被引用消息（宿主 s
 `reply_message_id` 不对外暴露，直传 `set_reply=True` 会因缺少被引用消息而发送失败）。
 本插件采用官方钩子通道实现引用回复：
 
-1. 发送前把目标消息 ID 挂起（按 `stream_id` 存放，30 秒 TTL，发送结束即清理）；
-2. 在 `send_service.before_send` 阻塞钩子中，识别出本插件发出的 Ciallo 出站消息，
-   向 Hook 的 `modified_kwargs` 注入 `set_reply=True` 与 `reply_message_id=<目标>`；
+1. 发送前把目标消息 ID 挂起（按 `stream_id` 多槽存放，每会话上限 4 条，60 秒 TTL，发送结束即按随机 token 精确清理）；
+2. 在 `send_service.before_send` 阻塞钩子中，以「出站文本 == Ciallo」作回退门控识别本插件发出的消息，
+   再按 TTL 时间窗与发送者一致性校验认领一条挂起目标，向 Hook 的 `modified_kwargs`
+   注入 `set_reply=True` 与 `reply_message_id=<目标>`（认领即移除）；
 3. 宿主 `_send_via_platform_io` 读取这两个键后构建 ReplyComponent，经适配器编码为平台引用段发出。
 
 > 该引用回复通道只服务于**工具 `send_ciallo(message_id=...)` 与关键词自动回复**（需要引用时）。
